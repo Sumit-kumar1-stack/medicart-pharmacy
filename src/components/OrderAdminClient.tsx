@@ -1,0 +1,7 @@
+'use client';
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+
+type Status='PRESCRIPTION_REVIEW'|'PAYMENT_PENDING'|'CONFIRMED'|'PICKING'|'PACKED'|'OUT_FOR_DELIVERY'|'DELIVERED'|'CANCELLED'|'REFUND_PENDING'|'REFUNDED';
+const next:Record<Status,Status[]>={PRESCRIPTION_REVIEW:['PAYMENT_PENDING','CANCELLED'],PAYMENT_PENDING:['CONFIRMED','CANCELLED'],CONFIRMED:['PICKING','CANCELLED'],PICKING:['PACKED','CANCELLED'],PACKED:['OUT_FOR_DELIVERY','CANCELLED'],OUT_FOR_DELIVERY:['DELIVERED'],DELIVERED:['REFUND_PENDING'],CANCELLED:[],REFUND_PENDING:['REFUNDED'],REFUNDED:[]};
+export function OrderAdminClient({id,status,paymentStatus}:{id:string;status:Status;paymentStatus:string}){const [busy,setBusy]=useState(false);const router=useRouter();async function update(to:Status){setBusy(true);const res=await fetch(`/api/admin/orders/${id}/status`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({status:to})});const body=await res.json().catch(()=>({}));if(!res.ok){alert(body.message??'Update failed');setBusy(false);return;}router.refresh()}return <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>{next[status].map(s=><button className={s==='CANCELLED'?'btn btn-danger':'btn'} disabled={busy||(s==='CANCELLED'&&paymentStatus==='PAID')} title={s==='CANCELLED'&&paymentStatus==='PAID'?'Paid orders must enter refund workflow instead of direct cancellation':undefined} key={s} onClick={()=>update(s)}>→ {s.replaceAll('_',' ')}</button>)}</div>}

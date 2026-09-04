@@ -1,0 +1,11 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
+import { requireRole } from '@/lib/auth';
+import { PHARMACY_REVIEW_ROLES } from '@/lib/permissions';
+import { prisma } from '@/lib/prisma';
+import { AppError, assertSameOrigin, jsonError } from '@/lib/http';
+import { enqueueNotification } from '@/lib/queue';
+
+const schema=z.object({status:z.enum(['APPROVED','REJECTED','NEEDS_CLARIFICATION']),note:z.string().trim().max(800).optional(),approvedItems:z.array(z.object({productId:z.string(),maxQuantity:z.number().int().min(1).max(20).nullable().default(null)})).max(30).default([])});
+export async function POST(req:NextRequest,{params}:{params:Promise<{id:string}>}){try{assertSameOrigin(req);const actor=await requireRole(PHARMACY_REVIEW_ROLES);const {id}=await params;const data=schema.parse(await req.json());const rx=await prisma.prescription.findUnique({where:{id}});if(!rx)throw new AppError(404,'NOT_FOUND','Prescription not found');if(data.status==='APPROVED'&&!data.approvedItems.length)throw new AppError(400,'APPROVED_ITEMS_REQUIRED','Select at least one Rx product to authorize');if(data.status==='APPROVED'){const ids=[...new Set(data.approvedItems.map(x=>x.productId))];const valid=await prisma.product.count({where:{id:{in:ids},active:true,prescriptionRequired:true}});if(valid!==ids.length)throw new AppError(400,'INVALID_PRODUCT','One or more selected products are not active Rx products');}
+await prisma.$transaction(async tx=>{await tx.prescriptionItem.deleteMany({where:{prescriptionId:id}});if(data.status==='APPROVED')await tx.prescriptionItem.createMany({data:data.approvedItems.map(x=>({prescriptionId:id,productId:x.productId,maxQuantity:x.maxQuantity})),skipDuplicates:true});await tx.prescription.update({where:{id},data:{status:data.status,reviewerId:actor.id,reviewedAt:new Date(),reviewNote:data.note||null}});await tx.auditLog.create({data:{actorId:actor.id,action:`PRESCRIPTION_${data.status}`,resourceType:'Prescription',resourceId:id,metadata:{approvedProductIds:data.approvedItems.map(x=>x.productId)}}})});await enqueueNotification(rx.userId,`Prescription ${data.status.toLowerCase().replace('_',' ')}`,data.note||`Your prescription status is now ${data.status.replaceAll('_',' ')}.`);return NextResponse.json({ok:true})}catch(e){return jsonError(e)}}

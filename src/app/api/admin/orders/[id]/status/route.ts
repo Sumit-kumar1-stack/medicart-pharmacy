@@ -1,0 +1,11 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
+import { requireRole } from '@/lib/auth';
+import { ORDER_MANAGEMENT_ROLES } from '@/lib/permissions';
+import { prisma } from '@/lib/prisma';
+import { AppError, assertSameOrigin, jsonError } from '@/lib/http';
+import { canTransition } from '@/lib/order-status';
+import { enqueueNotification } from '@/lib/queue';
+
+const schema=z.object({status:z.enum(['PRESCRIPTION_REVIEW','PAYMENT_PENDING','CONFIRMED','PICKING','PACKED','OUT_FOR_DELIVERY','DELIVERED','CANCELLED','REFUND_PENDING','REFUNDED']),note:z.string().trim().max(500).optional()});
+export async function POST(req:NextRequest,{params}:{params:Promise<{id:string}>}){try{assertSameOrigin(req);const actor=await requireRole(ORDER_MANAGEMENT_ROLES);const {id}=await params;const data=schema.parse(await req.json());const order=await prisma.order.findUnique({where:{id},include:{items:true}});if(!order)throw new AppError(404,'NOT_FOUND','Order not found');if(!canTransition(order.status,data.status))throw new AppError(409,'INVALID_TRANSITION',`Cannot move order from ${order.status} to ${data.status}`);if(data.status==='CANCELLED'&&order.paymentStatus==='PAID')throw new AppError(409,'REFUND_REQUIRED','Paid orders cannot be directly cancelled; use the refund workflow');await prisma.$transaction(async tx=>{if(data.status==='CANCELLED'){for(const item of order.items){for(const part of (item.batchSnapshot??'').split(',').map(x=>x.trim()).filter(Boolean)){const idx=part.lastIndexOf(':');if(idx<1)continue;const batchNumber=part.slice(0,idx);const qty=Number(part.slice(idx+1));if(Number.isInteger(qty)&&qty>0)await tx.inventoryBatch.update({where:{productId_batchNumber:{productId:item.productId,batchNumber}},data:{quantityAvailable:{increment:qty}}});}}}await tx.order.update({where:{id},data:{status:data.status,...(data.status==='REFUNDED'?{paymentStatus:'REFUNDED' as const}:{})}});await tx.orderStatusHistory.create({data:{orderId:id,status:data.status,note:data.note||null}});await tx.auditLog.create({data:{actorId:actor.id,action:'ORDER_STATUS_CHANGED',resourceType:'Order',resourceId:id,metadata:{from:order.status,to:data.status}}});});await enqueueNotification(order.userId,'Order updated',`${order.publicId}: ${data.status.replaceAll('_',' ')}`);return NextResponse.json({ok:true})}catch(e){return jsonError(e)}}
